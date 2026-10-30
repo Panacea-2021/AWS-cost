@@ -19,7 +19,19 @@ const CHAT_IDS = [
   process.env.TELEGRAM_GROUP_CHAT_ID,
 ].filter(Boolean);
 
-// Get today's date in India (YYYY-MM-DD)
+const SERVICE_LABELS = [
+  "S3",
+  "RDS",
+  "EC2-Instances",
+  "Cost Explorer",
+  "EC2-Other",
+  "VPC",
+  "CloudTrail",
+  "CloudShell",
+  "Glue",
+  "Others",
+];
+
 function getIndiaDate() {
   const parts = new Intl.DateTimeFormat("en-CA", {
     timeZone: "Asia/Kolkata",
@@ -36,22 +48,99 @@ function getIndiaDate() {
   return `${values.year}-${values.month}-${values.day}`;
 }
 
-// Subtract days from a YYYY-MM-DD date
+function getIndiaTime() {
+  return new Intl.DateTimeFormat("en-IN", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: true,
+  }).format(new Date());
+}
+
 function subtractDays(dateString, days) {
   const date = new Date(`${dateString}T00:00:00Z`);
   date.setUTCDate(date.getUTCDate() - days);
   return date.toISOString().slice(0, 10);
 }
 
-function getAmount(value) {
-  return Number(value || 0);
+function formatDate(dateString) {
+  return new Date(`${dateString}T00:00:00Z`).toLocaleDateString(
+    "en-US",
+    {
+      timeZone: "UTC",
+      month: "short",
+      day: "2-digit",
+      year: "numeric",
+    }
+  );
 }
 
 function formatCost(amount) {
   return `$${amount.toFixed(4)}`;
 }
 
-// Fetch AWS costs grouped by service
+function classifyService(name) {
+  const service = name.toLowerCase();
+
+  if (service.includes("simple storage") || service === "s3") {
+    return "S3";
+  }
+
+  if (
+    service.includes("relational database") ||
+    service.includes("rds")
+  ) {
+    return "RDS";
+  }
+
+  if (
+    service.includes("ec2 - instances") ||
+    service.includes("ec2 instances") ||
+    service.includes("ec2-instance")
+  ) {
+    return "EC2-Instances";
+  }
+
+  if (
+    service.includes("cost explorer") ||
+    service.includes("cost management")
+  ) {
+    return "Cost Explorer";
+  }
+
+  if (
+    service.includes("ec2 - other") ||
+    service.includes("ec2 other")
+  ) {
+    return "EC2-Other";
+  }
+
+  if (
+    service.includes("virtual private cloud") ||
+    service === "vpc" ||
+    service.includes("vpc")
+  ) {
+    return "VPC";
+  }
+
+  if (service.includes("cloudtrail")) {
+    return "CloudTrail";
+  }
+
+  if (service.includes("cloudshell")) {
+    return "CloudShell";
+  }
+
+  if (service.includes("glue")) {
+    return "Glue";
+  }
+
+  return "Others";
+}
+
 async function fetchCosts(startDate, endDate, granularity) {
   const command = new GetCostAndUsageCommand({
     TimePeriod: {
@@ -70,34 +159,37 @@ async function fetchCosts(startDate, endDate, granularity) {
 
   const response = await client.send(command);
 
-  const results = response.ResultsByTime || [];
+  const services = Object.fromEntries(
+    SERVICE_LABELS.map((label) => [label, 0])
+  );
 
   let total = 0;
-  const services = {};
 
-  for (const period of results) {
+  for (const period of response.ResultsByTime || []) {
     for (const group of period.Groups || []) {
       const serviceName = group.Keys?.[0] || "Other";
-      const amount = getAmount(
-        group.Metrics?.UnblendedCost?.Amount
+      const amount = Number(
+        group.Metrics?.UnblendedCost?.Amount || 0
       );
 
-      services[serviceName] =
-        (services[serviceName] || 0) + amount;
+      const label = classifyService(serviceName);
 
+      services[label] += amount;
       total += amount;
     }
 
-    // Use AWS total if available
-    if (period.Total?.UnblendedCost?.Amount !== undefined) {
-      total = getAmount(period.Total.UnblendedCost.Amount);
+    // Use period total only if service groups are unavailable.
+    if (
+      (!period.Groups || period.Groups.length === 0) &&
+      period.Total?.UnblendedCost?.Amount !== undefined
+    ) {
+      total += Number(period.Total.UnblendedCost.Amount);
     }
   }
 
   return { total, services };
 }
 
-// Send Telegram message
 async function sendTelegramMessage(chatId, message) {
   const response = await fetch(
     `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
@@ -109,7 +201,6 @@ async function sendTelegramMessage(chatId, message) {
       body: JSON.stringify({
         chat_id: chatId,
         text: message,
-        parse_mode: "HTML",
       }),
     }
   );
@@ -118,144 +209,110 @@ async function sendTelegramMessage(chatId, message) {
 
   if (!response.ok || !result.ok) {
     throw new Error(
-      `Telegram failed for chat ${chatId}: ${JSON.stringify(result)}`
+      `Telegram failed: ${JSON.stringify(result)}`
     );
   }
 
-  console.log(`Telegram message sent successfully to ${chatId}`);
+  console.log(
+    `Telegram message sent successfully to ${chatId}`
+  );
 }
 
-// Main report function
 async function sendCostReport() {
   if (
     !process.env.COST_BOT_ACCESS_KEY_ID ||
     !process.env.COST_BOT_SECRET_ACCESS_KEY
   ) {
-    throw new Error("AWS credentials are missing in Netlify environment variables.");
+    throw new Error("AWS credentials are missing.");
   }
 
   if (!BOT_TOKEN) {
-    throw new Error("TELEGRAM_BOT_TOKEN is missing.");
+    throw new Error("Telegram bot token is missing.");
   }
 
   if (CHAT_IDS.length === 0) {
-    throw new Error("No Telegram chat IDs configured.");
+    throw new Error("Telegram chat IDs are missing.");
   }
 
-  // Cost Explorer End date is exclusive.
-  // So fetch yesterday's complete daily cost.
   const today = getIndiaDate();
   const yesterday = subtractDays(today, 1);
-
   const monthStart = `${today.slice(0, 7)}-01`;
 
   console.log(`Fetching daily AWS cost for ${yesterday}`);
-  console.log(`Fetching monthly AWS cost from ${monthStart} to ${today}`);
+  console.log(
+    `Fetching monthly AWS cost from ${monthStart} to ${today}`
+  );
 
-  // Daily cost: yesterday only
+  // Previous complete day cost (End date is exclusive).
   const dailyData = await fetchCosts(
     yesterday,
     today,
     "DAILY"
   );
 
-  // Monthly cost: first day of month up to yesterday
-  let monthlyData = { total: 0, services: {} };
+  // Current month cost up to yesterday.
+  const monthlyData = await fetchCosts(
+    monthStart,
+    today,
+    "MONTHLY"
+  );
 
-  if (monthStart < today) {
-    monthlyData = await fetchCosts(
-      monthStart,
-      today,
-      "MONTHLY"
-    );
-  }
+  const serviceLines = SERVICE_LABELS.map(
+    (name) => `• ${name}: ${formatCost(dailyData.services[name])}`
+  );
 
-  const dailyServiceLines = Object.entries(dailyData.services)
-    .filter(([, amount]) => amount !== 0)
-    .sort((a, b) => b[1] - a[1])
-    .map(([name, amount]) => {
-      return `• ${name}: ${formatCost(amount)}`;
-    });
-
-  const serviceText = dailyServiceLines.length
-    ? dailyServiceLines.join("\n")
-    : "No service costs reported for this date.";
+  const reportDate = formatDate(today);
+  const updatedTime = getIndiaTime();
 
   const message = `
-<b>📊 AWS COST REPORT</b>
+📊 AWS COST REPORT
 
-<b>📅 Daily Cost</b>
-Date: ${yesterday}
-<b>Total: ${formatCost(dailyData.total)}</b>
+📅 Report Date: ${reportDate}
 
-<b>📦 Daily Service Breakdown</b>
-${serviceText}
+💰 DAILY SERVICE COST
 
-<b>📆 Monthly Cost</b>
-Period: ${monthStart} to ${yesterday}
-<b>Monthly Total: ${formatCost(monthlyData.total)}</b>
+${serviceLines.join("\n")}
 
-<i>Source: AWS Cost Explorer</i>
-<i>Note: AWS billing data may be delayed.</i>
-`;
+📌 Daily Total: ${formatCost(dailyData.total)}
+📅 Current Month Total: ${formatCost(monthlyData.total)}
 
-  // Send to personal chat and group independently
+🕒 Updated Check: ${updatedTime} IST
+⏱️ Next Check: Every 2 Hours
+`.trim();
+
   const results = await Promise.allSettled(
     [...new Set(CHAT_IDS)].map((chatId) =>
       sendTelegramMessage(chatId, message)
     )
   );
 
-  const failed = results.filter(
+  const failures = results.filter(
     (result) => result.status === "rejected"
   );
 
-  if (failed.length > 0) {
-    failed.forEach((result) => {
-      console.error("Telegram notification error:", result.reason);
-    });
+  failures.forEach((result) => {
+    console.error("Telegram notification error:", result.reason);
+  });
 
+  if (failures.length > 0) {
     throw new Error(
-      `${failed.length} Telegram notification(s) failed.`
+      `${failures.length} Telegram notification(s) failed.`
     );
   }
 
   console.log("AWS cost report sent successfully.");
-
-  return {
-    dailyDate: yesterday,
-    dailyTotal: dailyData.total,
-    monthlyTotal: monthlyData.total,
-    notificationsSent: results.length,
-  };
 }
 
-// Netlify scheduled function: every 2 hours
 export const config = {
   schedule: "0 */2 * * *",
 };
 
 export default async () => {
   try {
-    const report = await sendCostReport();
-
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        success: true,
-        message: "AWS cost report sent successfully.",
-        report,
-      }),
-    };
+    await sendCostReport();
+    console.log("Cost report completed successfully.");
   } catch (error) {
     console.error("AWS Cost Monitoring Error:", error);
-
-    return {
-      statusCode: 500,
-      body: JSON.stringify({
-        success: false,
-        error: error.message,
-      }),
-    };
+    throw error;
   }
 };
