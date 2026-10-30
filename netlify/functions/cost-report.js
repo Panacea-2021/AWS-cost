@@ -3,9 +3,9 @@ import {
   GetCostAndUsageCommand
 } from "@aws-sdk/client-cost-explorer";
 
-const AWS_ACCESS_KEY_ID = process.env.AWS_ACCESS_KEY_ID;
-const AWS_SECRET_ACCESS_KEY = process.env.AWS_SECRET_ACCESS_KEY;
-const AWS_REGION = process.env.AWS_REGION || "ap-south-1";
+const AWS_ACCESS_KEY_ID = process.env.COST_BOT_ACCESS_KEY_ID;
+const AWS_SECRET_ACCESS_KEY = process.env.COST_BOT_SECRET_ACCESS_KEY;
+const AWS_REGION = process.env.COST_BOT_REGION || "ap-south-1";
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
