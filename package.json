@@ -1,0 +1,15 @@
+{
+  "name": "aws-cost-monitoring-bot",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "netlify dev"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cost-explorer": "^3.0.0"
+  },
+  "devDependencies": {
+    "netlify-cli": "^23.0.0"
+  }
+}
