@@ -256,7 +256,7 @@ ${serviceLines.join("\n")}
 📅 Current Month Total: ${formatCost(monthlyData.total)}
 
 🕒 Updated Check: ${getIndiaTime()} IST
-⏱️ Next Check: Every 2 Hours
+⏱️ Next Check: Every 4 Hours
 `.trim();
 
   const results = await Promise.allSettled(
@@ -281,7 +281,7 @@ ${serviceLines.join("\n")}
 }
 
 export const config = {
-  schedule: "0 */2 * * *",
+  schedule: "0 */4 * * *",
 };
 
 export default async () => {
