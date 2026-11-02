@@ -1,8 +1,9 @@
-
 import {
   CostExplorerClient,
   GetCostAndUsageCommand,
 } from "@aws-sdk/client-cost-explorer";
+
+import { getStore } from "@netlify/blobs";
 
 const client = new CostExplorerClient({
   region: "us-east-1",
@@ -11,6 +12,8 @@ const client = new CostExplorerClient({
     secretAccessKey: process.env.COST_BOT_SECRET_ACCESS_KEY,
   },
 });
+
+const store = getStore("aws-cost-history");
 
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
@@ -23,12 +26,12 @@ const SERVICE_LABELS = [
   "S3",
   "RDS",
   "EC2-Instances",
-  "Cost Explorer",
   "EC2-Other",
   "VPC",
   "CloudTrail",
   "CloudShell",
   "Glue",
+  "Cost Explorer",
   "Others",
 ];
 
@@ -41,6 +44,7 @@ function getIndiaDate() {
   }).formatToParts(new Date());
 
   const values = {};
+
   for (const part of parts) {
     values[part.type] = part.value;
   }
@@ -50,11 +54,13 @@ function getIndiaDate() {
 
 function addDays(dateString, days) {
   const date = new Date(`${dateString}T00:00:00Z`);
+
   date.setUTCDate(date.getUTCDate() + days);
+
   return date.toISOString().slice(0, 10);
 }
 
-function getIndiaTime() {
+function getIndiaTime(date = new Date()) {
   return new Intl.DateTimeFormat("en-IN", {
     timeZone: "Asia/Kolkata",
     day: "2-digit",
@@ -63,7 +69,7 @@ function getIndiaTime() {
     hour: "2-digit",
     minute: "2-digit",
     hour12: true,
-  }).format(new Date());
+  }).format(date);
 }
 
 function formatDate(dateString) {
@@ -79,7 +85,7 @@ function formatDate(dateString) {
 }
 
 function formatCost(amount) {
-  return `$${amount.toFixed(4)}`;
+  return `$${Number(amount || 0).toFixed(4)}`;
 }
 
 function classifyService(name) {
@@ -96,11 +102,17 @@ function classifyService(name) {
     return "RDS";
   }
 
-  if (service.includes("cost explorer") || service.includes("cost management")) {
+  if (
+    service.includes("cost explorer") ||
+    service.includes("cost management")
+  ) {
     return "Cost Explorer";
   }
 
-  if (service.includes("ec2 - other") || service.includes("ec2 other")) {
+  if (
+    service.includes("ec2 - other") ||
+    service.includes("ec2 other")
+  ) {
     return "EC2-Other";
   }
 
@@ -113,7 +125,10 @@ function classifyService(name) {
     return "EC2-Instances";
   }
 
-  if (service.includes("virtual private cloud") || service.includes("vpc")) {
+  if (
+    service.includes("virtual private cloud") ||
+    service.includes("vpc")
+  ) {
     return "VPC";
   }
 
@@ -132,6 +147,7 @@ function classifyService(name) {
   return "Others";
 }
 
+// Fetch AWS cost
 async function fetchCosts(startDate, endDate, granularity) {
   const command = new GetCostAndUsageCommand({
     TimePeriod: {
@@ -159,6 +175,7 @@ async function fetchCosts(startDate, endDate, granularity) {
   for (const period of response.ResultsByTime || []) {
     for (const group of period.Groups || []) {
       const serviceName = group.Keys?.[0] || "Other";
+
       const amount = Number(
         group.Metrics?.UnblendedCost?.Amount || 0
       );
@@ -177,17 +194,136 @@ async function fetchCosts(startDate, endDate, granularity) {
     }
   }
 
-  return { total, services };
+  return {
+    total,
+    services,
+  };
 }
 
+// Save first and latest snapshots for a date
+async function saveDailySnapshot(date, currentData) {
+  const key = `daily-${date}`;
+
+  const previous = await store.get(key, {
+    type: "json",
+    consistency: "strong",
+  });
+
+  const now = new Date().toISOString();
+
+  // First snapshot for this date
+  if (!previous) {
+    const firstUpdate = {
+      total: currentData.total,
+      services: currentData.services,
+      capturedAt: now,
+    };
+
+    const snapshot = {
+      date,
+      firstUpdate,
+      latestUpdate: firstUpdate,
+      secondUpdate: null,
+    };
+
+    await store.setJSON(key, snapshot);
+
+    console.log(`First snapshot saved for ${date}`);
+
+    return snapshot;
+  }
+
+  // Check whether the latest AWS data changed
+  const previousTotal = Number(
+    previous.latestUpdate.total || 0
+  );
+
+  const currentTotal = Number(currentData.total || 0);
+
+  const hasChanged = previousTotal !== currentTotal;
+
+  let secondUpdate = previous.secondUpdate || null;
+
+  if (hasChanged) {
+    // Save the latest detected change time.
+    // This can happen the following morning too.
+    secondUpdate = {
+      detectedAt: now,
+      additionalCost:
+        currentTotal - Number(previous.firstUpdate.total || 0),
+    };
+
+    console.log(`Cost change detected for ${date}`);
+  }
+
+  const snapshot = {
+    date,
+
+    // Never overwrite the first snapshot
+    firstUpdate: previous.firstUpdate,
+
+    // Always keep the latest AWS cumulative cost
+    latestUpdate: {
+      total: currentData.total,
+      services: currentData.services,
+      capturedAt: now,
+    },
+
+    secondUpdate,
+  };
+
+  await store.setJSON(key, snapshot);
+
+  return snapshot;
+}
+
+// Format yesterday's snapshot for notification
+function getYesterdayReport(snapshot) {
+  if (!snapshot) {
+    return {
+      firstTime: "Not available",
+      firstCost: 0,
+      secondTime: "No second update detected",
+      additionalCost: 0,
+      total: 0,
+    };
+  }
+
+  const firstTime = getIndiaTime(
+    new Date(snapshot.firstUpdate.capturedAt)
+  );
+
+  const secondTime = snapshot.secondUpdate
+    ? getIndiaTime(new Date(snapshot.secondUpdate.detectedAt))
+    : "No second update detected yet";
+
+  const firstCost = Number(snapshot.firstUpdate.total || 0);
+
+  // Latest cumulative cost minus first snapshot
+  const total = Number(snapshot.latestUpdate.total || 0);
+
+  const additionalCost = total - firstCost;
+
+  return {
+    firstTime,
+    firstCost,
+    secondTime,
+    additionalCost,
+    total,
+  };
+}
+
+// Send Telegram message
 async function sendTelegramMessage(chatId, message) {
   const response = await fetch(
     `https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`,
     {
       method: "POST",
+
       headers: {
         "Content-Type": "application/json",
       },
+
       body: JSON.stringify({
         chat_id: chatId,
         text: message,
@@ -198,12 +334,17 @@ async function sendTelegramMessage(chatId, message) {
   const result = await response.json();
 
   if (!response.ok || !result.ok) {
-    throw new Error(`Telegram failed: ${JSON.stringify(result)}`);
+    throw new Error(
+      `Telegram failed: ${JSON.stringify(result)}`
+    );
   }
 
-  console.log(`Telegram message sent successfully to ${chatId}`);
+  console.log(
+    `Telegram message sent successfully to ${chatId}`
+  );
 }
 
+// Main report function
 async function sendCostReport() {
   if (
     !process.env.COST_BOT_ACCESS_KEY_ID ||
@@ -216,49 +357,98 @@ async function sendCostReport() {
     throw new Error("Telegram configuration is missing.");
   }
 
-  // Recalculate dates every time the function runs.
+  // Recalculate dates on every function execution
   const today = getIndiaDate();
+
+  const yesterday = addDays(today, -1);
   const tomorrow = addDays(today, 1);
+
   const monthStart = `${today.slice(0, 7)}-01`;
 
   console.log(`Fetching today's AWS cost: ${today} to ${tomorrow}`);
-  console.log(`Fetching monthly AWS cost: ${monthStart} to ${tomorrow}`);
 
-  // Today's available cost data.
-  // End date is exclusive, so tomorrow includes today's period.
-  const dailyData = await fetchCosts(
-    today,
-    tomorrow,
-    "DAILY"
+  console.log(
+    `Fetching yesterday's AWS cost: ${yesterday} to ${today}`
   );
 
-  // Current month's available cost, including today.
-  const monthlyData = await fetchCosts(
-    monthStart,
-    tomorrow,
-    "MONTHLY"
+  console.log(
+    `Fetching monthly AWS cost: ${monthStart} to ${tomorrow}`
   );
 
+  // Fetch today, yesterday and current month costs
+  const [
+    dailyData,
+    yesterdayData,
+    monthlyData,
+  ] = await Promise.all([
+    fetchCosts(today, tomorrow, "DAILY"),
+
+    fetchCosts(yesterday, today, "DAILY"),
+
+    fetchCosts(monthStart, tomorrow, "MONTHLY"),
+  ]);
+
+  // Save today's snapshot and update yesterday's snapshot
+  const [
+    todaySnapshot,
+    yesterdaySnapshot,
+  ] = await Promise.all([
+    saveDailySnapshot(today, dailyData),
+
+    saveDailySnapshot(yesterday, yesterdayData),
+  ]);
+
+  // Prepare yesterday report
+  const yesterdayReport = getYesterdayReport(
+    yesterdaySnapshot
+  );
+
+  // Today's service breakdown
   const serviceLines = SERVICE_LABELS.map(
-    (name) => `• ${name}: ${formatCost(dailyData.services[name])}`
+    (name) =>
+      `• ${name}: ${formatCost(dailyData.services[name])}`
   );
 
+  // Complete Telegram notification
   const message = `
 📊 AWS COST REPORT
 
 📅 Report Date: ${formatDate(today)}
 
-💰 DAILY SERVICE COST
+
+📅 YESTERDAY COST
+
+📅 Date: ${formatDate(yesterday)}
+
+🕒 First Update: ${yesterdayReport.firstTime}
+💰 First Cost: ${formatCost(yesterdayReport.firstCost)}
+
+🕒 Second Update: ${yesterdayReport.secondTime}
+💰 Additional Cost: ${formatCost(yesterdayReport.additionalCost)}
+
+📌 Yesterday Total: ${formatCost(yesterdayReport.total)}
+
+
+💰 TODAY DAILY COST
+
+📅 Date: ${formatDate(today)}
 
 ${serviceLines.join("\n")}
 
-📌 Daily Total: ${formatCost(dailyData.total)}
-📅 Current Month Total: ${formatCost(monthlyData.total)}
+📌 Today's Total: ${formatCost(dailyData.total)}
+
+
+📊 CURRENT MONTH TOTAL
+
+📌 Monthly Total: ${formatCost(monthlyData.total)}
+
 
 🕒 Updated Check: ${getIndiaTime()} IST
+
 ⏱️ Next Check: Every 4 Hours
 `.trim();
 
+  // Send notification to personal and group chats
   const results = await Promise.allSettled(
     [...new Set(CHAT_IDS)].map((chatId) =>
       sendTelegramMessage(chatId, message)
@@ -270,21 +460,28 @@ ${serviceLines.join("\n")}
   );
 
   failures.forEach((result) => {
-    console.error("Telegram notification error:", result.reason);
+    console.error(
+      "Telegram notification error:",
+      result.reason
+    );
   });
 
   if (failures.length > 0) {
-    throw new Error(`${failures.length} Telegram notification(s) failed.`);
+    throw new Error(
+      `${failures.length} Telegram notification(s) failed.`
+    );
   }
 
   console.log("AWS cost report sent successfully.");
 }
 
+// Run every 4 hours
 export const config = {
   schedule: "0 */4 * * *",
 };
 
 export default async () => {
   await sendCostReport();
+
   console.log("Cost report completed successfully.");
 };
