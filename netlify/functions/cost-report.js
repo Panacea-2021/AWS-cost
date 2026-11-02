@@ -1,3 +1,4 @@
+
 import {
   CostExplorerClient,
   GetCostAndUsageCommand,
@@ -327,6 +328,7 @@ async function sendTelegramMessage(chatId, message) {
       body: JSON.stringify({
         chat_id: chatId,
         text: message,
+        parse_mode: "HTML",
       }),
     }
   );
@@ -411,12 +413,12 @@ async function sendCostReport() {
 
   // Complete Telegram notification
   const message = `
-📊 AWS COST REPORT
+📊 <b>AWS COST REPORT</b>
 
 📅 Report Date: ${formatDate(today)}
 
 
-📅 YESTERDAY COST
+📅 <b>YESTERDAY COST</b>
 
 📅 Date: ${formatDate(yesterday)}
 
@@ -429,7 +431,7 @@ async function sendCostReport() {
 📌 Yesterday Total: ${formatCost(yesterdayReport.total)}
 
 
-💰 TODAY DAILY COST
+💰 <b>TODAY DAILY COST</b>
 
 📅 Date: ${formatDate(today)}
 
@@ -438,14 +440,14 @@ ${serviceLines.join("\n")}
 📌 Today's Total: ${formatCost(dailyData.total)}
 
 
-📊 CURRENT MONTH TOTAL
+📊 <b>CURRENT MONTH TOTAL</b>
 
 📌 Monthly Total: ${formatCost(monthlyData.total)}
 
 
 🕒 Updated Check: ${getIndiaTime()} IST
 
-⏱️ Next Check: Every 4 Hours
+⏱️ <b>Next Check</b>: Every 4 Hours
 `.trim();
 
   // Send notification to personal and group chats
